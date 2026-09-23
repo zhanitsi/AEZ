@@ -1,0 +1,21 @@
+const assert=require('node:assert/strict'),E=require('./engine');
+let passed=0;function test(name,fn){fn();passed++;console.log('PASS '+name);}
+const source=E.demo(),base=E.calculate(source),row=(d,sku='EKT-001')=>E.calculate(d).rows.find(r=>r.sku===sku&&r.warehouse_id==='W1');
+test('Demo: 30 products, 2 warehouses, 24 months, 60 recommendations',()=>{assert.equal(source.products.length,30);assert.equal(base.rows.length,60);assert.equal(base.rows[0].model.days,730);});
+test('No sales on full stockout dates',()=>{for(const s of source.stockouts)assert(!source.sales.some(r=>r.sku===s.sku&&r.warehouse_id===s.warehouse_id&&r.date>=s.start_date&&r.date<=s.end_date));});
+test('Stock increase cannot increase order',()=>{const d=structuredClone(source),before=row(d);d.inventory[0].on_hand+=100;assert(row(d).qty<=before.qty);});
+test('Timely inbound reduces need',()=>{const d=structuredClone(source),before=row(d);d.inbound.push({inbound_id:'test',sku:'EKT-001',warehouse_id:'W1',quantity:500,expected_date:d.date,status:'confirmed'});assert(row(d).qty<before.qty);});
+test('Late inbound does not hide earlier shortage',()=>{const d=structuredClone(source);d.inventory[0].on_hand=0;d.inbound=d.inbound.filter(i=>i.sku!=='EKT-001');d.inbound.push({inbound_id:'test',sku:'EKT-001',warehouse_id:'W1',quantity:9999,expected_date:E.add(d.date,40),status:'confirmed'});const r=row(d);assert.equal(r.risk,0);assert.equal(r.timely,0);});
+test('Outlier removal: added project changes forecast <10%',()=>{const d=structuredClone(source),before=row(d);d.sales.push({sale_id:'new-project',date:E.add(d.date,-5),sku:'EKT-001',warehouse_id:'W1',customer_id:'C-NEW',quantity:9000});const after=row(d);assert(Math.abs(after.demand/before.demand-1)<.1);});
+test('Regular large client orders remain in forecast',()=>{const aa=base.anomalies.filter(a=>a.sku==='EKT-006'&&a.customer_id==='C-080');assert(aa.length>10);assert(aa.every(a=>!a.excluded));});
+test('Manual anomaly override increases forecast',()=>{const d=structuredClone(source),a=base.anomalies.find(a=>a.sku==='EKT-001'&&a.warehouse_id==='W1'&&a.excluded),before=row(d);d.decisions[a.id]='regular';assert(row(d).demand>before.demand);});
+test('Stockout compensation exceeds raw observed sales',()=>{const d=structuredClone(source),before=row(d,'EKT-003');d.stockouts=[];const raw=row(d,'EKT-003');assert(before.model.restored>0);assert(before.demand>raw.demand);});
+test('Seasonality changes monthly prediction',()=>{const r=base.rows[0];assert(r.model.seasonal);assert(Math.abs(r.model.predict(0)-r.model.predict(120))>.1);});
+test('Sustained trend has positive slope',()=>{assert(row(source,'EKT-002').model.slope>0);});
+test('Category growth changes demand',()=>{const d=structuredClone(source),before=row(d);d.category_settings[0].additional_growth_pct=30;assert(row(d).demand>before.demand*1.29);});
+test('Category review period changes order',()=>{const d=structuredClone(source),before=row(d);d.category_settings[0].review_period_days=30;assert(row(d).qty>before.qty);});
+test('Minimum order and pack constraints',()=>{const d=structuredClone(source);d.products[0].min_order_qty=201;d.products[0].pack_size=50;const r=row(d);assert.equal(r.qty%50,0);assert(r.qty>=201);d.inventory[0].on_hand=999999;assert.equal(row(d).qty,0);});
+test('Empty and short sales history stay finite',()=>{const d=structuredClone(source);d.sales=[];const r=row(d);assert.equal(r.qty,0);assert.equal(r.cover,null);assert(Number.isFinite(row(source,'EKT-030').demand));});
+test('Simulation keeps stock nonnegative and respects lead time',()=>{const r=base.rows[0],a=E.simulate(source,r,r.warehouse_id,r.model),b=E.simulate(source,r,r.warehouse_id,r.model,{order:1000});assert(a.every(x=>x.stock>=0&&x.lost>=0));for(let n=0;n<r.lead;n++)assert.equal(a[n].stock,b[n].stock);assert(b[r.lead].stock>a[r.lead].stock);});
+test('Past-due and unconfirmed inbound not subtracted',()=>{const d=structuredClone(source),before=row(d);d.inbound.push({sku:'EKT-001',warehouse_id:'W1',quantity:9999,expected_date:E.add(d.date,-1),status:'confirmed'},{sku:'EKT-001',warehouse_id:'W1',quantity:9999,expected_date:E.add(d.date,1),status:'pending'});assert.equal(row(d).qty,before.qty);assert.equal(row(d).overdue,before.overdue+1);});
+console.log(`${passed} calculation tests passed`);
